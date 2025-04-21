@@ -1,0 +1,187 @@
+using System;
+using System.Net.Http;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using System.Xml.Linq;
+using System.Linq;
+using System.Globalization;
+
+namespace FuelSurchargeApp
+{
+    public class Program
+    {
+        public static async Task Main(string[] args)
+        {
+            // URL of the public Canadian fuel surcharge XML feed.
+            string feedUrl = "https://example.com/canada-fuel-surcharge.xml";  // TODO: replace with actual feed URL
+            
+            Logger.Info($"Starting fuel surcharge update from {feedUrl} ...");
+            
+            string xmlContent;
+            try
+            {
+                // Download the XML data from the feed
+                xmlContent = await DownloadFuelSurchargeData(feedUrl);
+                Logger.Info("Fuel surcharge data downloaded successfully.");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Failed to download fuel surcharge data: {ex.Message}");
+                return;
+            }
+            
+            // Parse the XML content to extract fuel surcharge rate entries
+            List<FuelSurchargeRate> rates;
+            try
+            {
+                rates = ParseFuelSurchargeRates(xmlContent);
+                Logger.Info($"Parsed {rates.Count} fuel surcharge entries from the feed.");
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Failed to parse fuel surcharge data: {ex.Message}");
+                return;
+            }
+            
+            if (rates.Count == 0)
+            {
+                Logger.Error("No fuel surcharge entries found in the feed.");
+                return;
+            }
+            
+            // Determine the most recent effective rate as of today
+            FuelSurchargeRate latestRate = GetLatestEffectiveRate(rates, DateTime.Today);
+            if (latestRate == null)
+            {
+                Logger.Info("No current fuel surcharge rate is effective for today's date.");
+            }
+            else
+            {
+                Logger.Info($"Latest fuel surcharge rate is {latestRate.RatePercent}% effective {latestRate.EffectiveDate:yyyy-MM-dd}.");
+            }
+            
+            // Note: In a real application, you might save the latestRate to a database or further process it.
+        }
+        
+        /// <summary>
+        /// Downloads the XML data from the specified URL using an HTTP GET request.
+        /// </summary>
+        private static async Task<string> DownloadFuelSurchargeData(string url)
+        {
+            using var client = new HttpClient();
+            client.Timeout = TimeSpan.FromSeconds(30);  // set a timeout for the request
+            
+            HttpResponseMessage response = await client.GetAsync(url);
+            response.EnsureSuccessStatusCode();  // throw an exception if the status is not 200-299
+            
+            string content = await response.Content.ReadAsStringAsync();
+            return content;
+        }
+        
+        /// <summary>
+        /// Parses the XML content and returns a list of FuelSurchargeRate objects.
+        /// Expects each rate entry in the XML to have an effective date and a rate percentage.
+        /// </summary>
+        private static List<FuelSurchargeRate> ParseFuelSurchargeRates(string xmlContent)
+        {
+            XDocument doc = XDocument.Parse(xmlContent);
+            // Assuming the XML structure contains elements named "rate" with child elements "effectiveDate" and "ratePercent"
+            var rateElements = doc.Descendants("rate");
+            
+            List<FuelSurchargeRate> rates = new List<FuelSurchargeRate>();
+            foreach (var rateElement in rateElements)
+            {
+                // Extract the text values for date and rate
+                string dateText = rateElement.Element("effectiveDate")?.Value;
+                string rateText = rateElement.Element("ratePercent")?.Value;
+                if (string.IsNullOrWhiteSpace(dateText) || string.IsNullOrWhiteSpace(rateText))
+                {
+                    // Skip this entry if required data is missing
+                    continue;
+                }
+                
+                // Parse the effective date
+                DateTime effectiveDate;
+                if (!DateTime.TryParse(dateText, out effectiveDate))
+                {
+                    // If the date format is known (e.g., "yyyy-MM-dd"), we could use DateTime.ParseExact.
+                    // Here we use TryParse for simplicity and skip if it fails.
+                    Logger.Error($"Unrecognized date format '{dateText}' in feed; skipping this entry.");
+                    continue;
+                }
+                
+                // Parse the rate percent value
+                // Remove '%' if present (some feeds may include the percent sign in the value)
+                if (rateText.EndsWith("%"))
+                {
+                    rateText = rateText.TrimEnd('%');
+                }
+                // Use invariant culture to handle decimal point consistently (feed might use dot or comma)
+                decimal ratePercent;
+                if (!decimal.TryParse(rateText, NumberStyles.Any, CultureInfo.InvariantCulture, out ratePercent))
+                {
+                    Logger.Error($"Unrecognized rate format '{rateText}' in feed; skipping this entry.");
+                    continue;
+                }
+                
+                // Create a FuelSurchargeRate object and add to the list
+                var rateEntry = new FuelSurchargeRate
+                {
+                    EffectiveDate = effectiveDate,
+                    RatePercent = ratePercent
+                };
+                rates.Add(rateEntry);
+            }
+            
+            return rates;
+        }
+        
+        /// <summary>
+        /// Finds the latest fuel surcharge rate whose effective date is on or before the specified date.
+        /// If no rate is effective as of that date (all are future dates), returns null.
+        /// </summary>
+        private static FuelSurchargeRate GetLatestEffectiveRate(List<FuelSurchargeRate> rates, DateTime asOfDate)
+        {
+            // Filter rates that are effective on or before the given date
+            var applicableRates = rates.Where(r => r.EffectiveDate <= asOfDate);
+            if (!applicableRates.Any())
+            {
+                return null;
+            }
+            // Find the maximum (latest) effective date among those
+            DateTime maxDate = applicableRates.Max(r => r.EffectiveDate);
+            // Return the rate entry that has this latest date
+            return applicableRates.First(r => r.EffectiveDate == maxDate);
+        }
+    }
+    
+    /// <summary>
+    /// Simple model class for a fuel surcharge rate entry.
+    /// </summary>
+    public class FuelSurchargeRate
+    {
+        public DateTime EffectiveDate { get; set; }
+        public decimal RatePercent { get; set; }
+        
+        public override string ToString()
+        {
+            return $"{RatePercent}% effective {EffectiveDate:yyyy-MM-dd}";
+        }
+    }
+    
+    /// <summary>
+    /// Logger utility for console output with timestamps.
+    /// </summary>
+    public static class Logger
+    {
+        public static void Info(string message)
+        {
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] INFO: {message}");
+        }
+        
+        public static void Error(string message)
+        {
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] ERROR: {message}");
+        }
+    }
+}
